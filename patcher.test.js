@@ -18,10 +18,18 @@ const { spawnSync } = require('child_process');
 const { computeIntegrity, parseAsarHeader, readAsarFile, rewriteAsar } = require('./asarCodec');
 const { translateString, translateSubtree, installZhCnOverlay } = require('./zhInjector');
 const {
+  resolveExecutablePath,
+  normalizeCandidateToAsar,
+  parseRegistryInstallPaths,
+  locateAntigravityApp,
+  launchAntigravity,
+} = require('./appLocator');
+const {
   DEFAULT_ASAR_PATH,
   BACKUP_SUFFIX,
   PATCH_MARKER_START,
   PATCH_MARKER_END,
+  resolveTargetAsarPath,
   buildPatchedPreload,
   buildPatchedTray,
   buildPatchedMain,
@@ -425,6 +433,126 @@ test('回归测试：覆盖设置各子页长文案（>180字符）、动态倒�
   assert.equal(searchInput.getAttribute('placeholder'), '搜索快捷键...');
   assert.equal(learnMoreLink.childNodes[0].nodeValue, '了解更多。');
   assert.equal(menuText.nodeValue, '命令面板');
+
+  // 4. 补全快捷键、语音模式与模型配额页新增词条
+  assert.equal(translateString('Move Conversation Up'), '上移对话');
+  assert.equal(translateString('Move Conversation Down'), '下移对话');
+  assert.equal(translateString('Previous Side Panel Tab'), '上一个侧边栏标签页');
+  assert.equal(translateString('Next Side Panel Tab'), '下一个侧边栏标签页');
+  assert.equal(translateString('Open Keyboard Shortcuts'), '打开快捷键设置');
+  assert.equal(translateString('Open Settings'), '打开设置');
+  assert.equal(translateString('Submit Prompt (Alternate to Enter)'), '提交提示词（替代回车键）');
+  assert.equal(
+    translateString('Enter always submits. This adds a second shortcut.'),
+    '回车键始终用于提交。此项用于添加第二个快捷键。'
+  );
+  assert.equal(translateString('Jump to Previous Prompt'), '跳转到上一条提示词');
+  assert.equal(translateString('Jump to Next Prompt'), '跳转到下一条提示词');
+  assert.equal(translateString('Cancel Generation'), '取消生成');
+  assert.equal(
+    translateString('The voice used in Voice mode. Powered by Gemini Live.'),
+    '语音模式下使用的声音，由 Gemini Live 提供支持。'
+  );
+  assert.equal(translateString('Microphone'), '麦克风');
+  assert.equal(
+    translateString('Input device for voice mode and dictation.'),
+    '用于语音模式和语音听写的输入设备。'
+  );
+  assert.equal(translateString('System default'), '系统默认');
+  assert.equal(
+    translateString("How loud Antigravity's voice is."),
+    '控制 Antigravity 语音播报的音量大小。'
+  );
+  assert.equal(translateString('Claude and GPT models'), 'Claude 与 GPT 模型');
+  assert.equal(translateString('Gemini 4 Argon Weekly Limit'), 'Gemini 4 Argon 每周配额');
 });
+
+test('appLocator 自动检索路径、注册表解析、独立进程启动与 installPatch 自动拉起集成', () => {
+  // 1. 路径归一化与可执行文件推导
+  assert.equal(
+    normalizeCandidateToAsar('"D:\\Apps\\Antigravity\\Antigravity.exe",0'),
+    path.join('D:\\Apps\\Antigravity', 'resources', 'app.asar')
+  );
+  assert.equal(
+    normalizeCandidateToAsar('E:\\Custom\\Antigravity'),
+    path.join('E:\\Custom\\Antigravity', 'resources', 'app.asar')
+  );
+  assert.equal(
+    resolveExecutablePath('D:\\Apps\\Antigravity\\resources\\app.asar'),
+    path.join('D:\\Apps\\Antigravity', 'Antigravity.exe')
+  );
+
+  // 2. 注册表输出解析
+  const sampleReg = [
+    'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Antigravity',
+    '    InstallLocation    REG_SZ    D:\\MyApps\\Antigravity',
+    '    DisplayIcon    REG_SZ    "D:\\MyApps\\Antigravity\\Antigravity.exe",0',
+    '    UninstallString    REG_SZ    "D:\\MyApps\\Antigravity\\Uninstall Antigravity.exe" /S',
+  ].join('\r\n');
+  const regPaths = parseRegistryInstallPaths(sampleReg);
+  assert.equal(regPaths.length, 3);
+  assert.equal(regPaths[0], path.join('D:\\MyApps\\Antigravity', 'resources', 'app.asar'));
+
+  // 3. 真实本机自动检索应能定位到 Antigravity 2.0（而非 Antigravity IDE）
+  const located = locateAntigravityApp();
+  assert.ok(located, '本机应能自动检索到 Antigravity 2.0 安装路径');
+  assert.ok(fs.existsSync(located.asarPath));
+  assert.ok(located.exePath.endsWith('Antigravity.exe'));
+  assert.doesNotMatch(located.exePath, /Antigravity IDE\.exe$/i);
+
+  // 4. launchAntigravity 以 detached + unref 方式启动，缺失 exe 时明确报错
+  let spawnArgs = null;
+  let unrefCalled = false;
+  const launched = launchAntigravity('D:\\Apps\\Antigravity\\resources\\app.asar', {
+    existsFn: () => true,
+    spawnFn: (exe, args, opts) => {
+      spawnArgs = { exe, args, opts };
+      return {
+        pid: 4242,
+        unref: () => {
+          unrefCalled = true;
+        },
+      };
+    },
+  });
+  assert.equal(launched.pid, 4242);
+  assert.equal(spawnArgs.exe, path.join('D:\\Apps\\Antigravity', 'Antigravity.exe'));
+  assert.equal(spawnArgs.opts.detached, true);
+  assert.equal(unrefCalled, true);
+  assert.throws(
+    () => launchAntigravity('D:\\Missing\\resources\\app.asar', { existsFn: () => false }),
+    /未找到 Antigravity 可执行文件/
+  );
+
+  // 5. 端到端副本验证：省略 asarPath 时通过 locateFn 自动定位，并在 autoLaunch: true 时触发启动
+  const defaultBackup = `${DEFAULT_ASAR_PATH}${BACKUP_SUFFIX}`;
+  const cleanFixtureSource = fs.existsSync(defaultBackup) ? defaultBackup : DEFAULT_ASAR_PATH;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-zh-launch-'));
+  const copyAsar = path.join(tmpDir, 'resources', 'app.asar');
+  try {
+    fs.mkdirSync(path.dirname(copyAsar), { recursive: true });
+    fs.copyFileSync(cleanFixtureSource, copyAsar);
+    let launchedTarget = null;
+    const res = installPatch({
+      skipProcessCheck: true,
+      autoLaunch: true,
+      locateFn: () => ({ asarPath: copyAsar, exePath: resolveExecutablePath(copyAsar), source: 'mock' }),
+      launchFn: (targetAsar) => {
+        launchedTarget = targetAsar;
+        return { exePath: resolveExecutablePath(targetAsar), pid: 9999 };
+      },
+    });
+    assert.equal(res.asarPath, copyAsar);
+    assert.equal(launchedTarget, copyAsar);
+    assert.equal(res.launchedExePath, resolveExecutablePath(copyAsar));
+    assert.equal(
+      resolveTargetAsarPath(undefined, () => ({ asarPath: copyAsar })),
+      copyAsar
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 

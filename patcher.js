@@ -12,6 +12,7 @@ const readline = require('readline/promises');
 const { execFileSync } = require('child_process');
 const { parseAsarHeader, readAsarFile, rewriteAsar } = require('./asarCodec');
 const { buildInlinePreloadBundle } = require('./zhInjector');
+const { locateAntigravityApp, launchAntigravity } = require('./appLocator');
 const zhDict = require('./zhDict');
 
 // 默认安装路径与 ASAR 内部目标路径常量
@@ -209,15 +210,30 @@ function ensureCleanBackup(asarPath, backupPath) {
 }
 
 /**
+ * 解析目标 app.asar 路径：优先使用显式路径，否则自动检索本机 Antigravity 安装目录。
+ * @param {string | undefined} explicitPath 显式传入的路径
+ * @param {() => ({ asarPath: string } | null)} [locateFn] 可注入路径检索函数
+ * @returns {string}
+ */
+function resolveTargetAsarPath(explicitPath, locateFn = locateAntigravityApp) {
+  if (explicitPath) {
+    return explicitPath;
+  }
+  const located = locateFn();
+  return located ? located.asarPath : DEFAULT_ASAR_PATH;
+}
+
+/**
  * 查询目标 app.asar 的当前版本、备份状态与补丁安装状态。
- * @param {string} [asarPath] 可选自定义 app.asar 路径
+ * @param {string} [asarPath] 可选自定义 app.asar 路径（省略时自动检索）
  * @returns {{ asarPath: string, exists: boolean, version: string, patched: boolean, hasBackup: boolean }}
  */
-function getPatchStatus(asarPath = DEFAULT_ASAR_PATH) {
-  const backupPath = `${asarPath}${BACKUP_SUFFIX}`;
-  if (!fs.existsSync(asarPath)) {
+function getPatchStatus(asarPath) {
+  const targetPath = resolveTargetAsarPath(asarPath);
+  const backupPath = `${targetPath}${BACKUP_SUFFIX}`;
+  if (!fs.existsSync(targetPath)) {
     return {
-      asarPath,
+      asarPath: targetPath,
       exists: false,
       version: 'N/A',
       patched: false,
@@ -225,10 +241,10 @@ function getPatchStatus(asarPath = DEFAULT_ASAR_PATH) {
     };
   }
   return {
-    asarPath,
+    asarPath: targetPath,
     exists: true,
-    version: readAsarAppVersion(asarPath),
-    patched: isAsarPatched(asarPath),
+    version: readAsarAppVersion(targetPath),
+    patched: isAsarPatched(targetPath),
     hasBackup: fs.existsSync(backupPath),
   };
 }
@@ -273,18 +289,18 @@ function buildAsarUpdates(cleanSourcePath) {
 }
 
 /**
- * 安装或更新中文汉化补丁到指定 app.asar。
- * @param {{ asarPath?: string, skipProcessCheck?: boolean, checkRunning?: () => boolean }} [options]
- * @returns {{ version: string, backupPath: string, trayPatched: boolean, mainPatched: boolean, menuPatched: boolean, updatedCount: number }}
+ * 安装或更新中文汉化补丁到指定或自动检索到的 app.asar，可选完成后自动拉起软件。
+ * @param {object} [options] 配置项（asarPath / autoLaunch / skipProcessCheck / checkRunning / locateFn / launchFn）
+ * @returns {object}
  */
 function installPatch(options = {}) {
-  const asarPath = options.asarPath || DEFAULT_ASAR_PATH;
   const checkRunning = options.checkRunning || isAppRunning;
   if (!options.skipProcessCheck && checkRunning()) {
     throw new Error('检测到 Antigravity.exe 正在运行！请先彻底退出软件（含右下角系统托盘）后再试。');
   }
+  const asarPath = resolveTargetAsarPath(options.asarPath, options.locateFn);
   if (!fs.existsSync(asarPath)) {
-    throw new Error(`未找到目标文件: ${asarPath}`);
+    throw new Error(`未找到目标文件（自动检索与默认路径均不存在）: ${asarPath}`);
   }
 
   const backupPath = `${asarPath}${BACKUP_SUFFIX}`;
@@ -297,27 +313,34 @@ function installPatch(options = {}) {
   if (!isAsarPatched(asarPath)) {
     throw new Error('补丁写入后回读校验失败，未检测到补丁标记');
   }
+  let launchedExePath = null;
+  if (options.autoLaunch) {
+    const launchFn = options.launchFn || launchAntigravity;
+    launchedExePath = launchFn(asarPath).exePath;
+  }
   return {
+    asarPath,
     version,
     backupPath,
     trayPatched,
     mainPatched,
     menuPatched,
     updatedCount: result.updatedCount,
+    launchedExePath,
   };
 }
 
 /**
  * 从原始备份文件无损还原官方 app.asar。
- * @param {{ asarPath?: string, skipProcessCheck?: boolean, checkRunning?: () => boolean }} [options]
+ * @param {{ asarPath?: string, skipProcessCheck?: boolean, checkRunning?: () => boolean, locateFn?: Function }} [options]
  * @returns {{ asarPath: string, version: string }}
  */
 function restorePatch(options = {}) {
-  const asarPath = options.asarPath || DEFAULT_ASAR_PATH;
   const checkRunning = options.checkRunning || isAppRunning;
   if (!options.skipProcessCheck && checkRunning()) {
     throw new Error('检测到 Antigravity.exe 正在运行！请先彻底退出软件（含右下角系统托盘）后再还原。');
   }
+  const asarPath = resolveTargetAsarPath(options.asarPath, options.locateFn);
   const backupPath = `${asarPath}${BACKUP_SUFFIX}`;
   if (!fs.existsSync(backupPath)) {
     throw new Error(`未找到原始备份文件，无法还原: ${backupPath}`);
@@ -331,14 +354,16 @@ function restorePatch(options = {}) {
 }
 
 /**
- * 打印交互式中文管理工具主菜单。
+ * 打印交互式中文管理工具主菜单，并展示自动检索到的目标路径。
+ * @param {string} detectedPath 当前目标 app.asar 路径
  */
-function printMenuBanner() {
+function printMenuBanner(detectedPath) {
   console.log('\n========================================================');
   console.log('  Antigravity 2.0 简体中文汉化补丁管理工具');
   console.log('========================================================');
-  console.log('提示：安装或还原前，请彻底退出 Antigravity（含右下角托盘图标）。\n');
-  console.log('  [1] 安装 / 更新简体中文汉化补丁');
+  console.log(`目标路径: ${detectedPath}`);
+  console.log('提示：安装或还原前请彻底退出 Antigravity，安装后将自动重新打开。\n');
+  console.log('  [1] 自动检索并安装 / 更新汉化补丁（完成后自动打开）');
   console.log('  [2] 一键还原官方原版');
   console.log('  [3] 查看当前补丁状态');
   console.log('  [0] 退出\n');
@@ -347,9 +372,10 @@ function printMenuBanner() {
 /**
  * 执行单条 CLI 指令并向控制台打印中文结果。
  * @param {string} cmd 子命令名称（install / restore / status）
- * @param {string} asarPath 目标 app.asar 路径
+ * @param {string | undefined} asarPath 目标 app.asar 路径（未传则自动检索）
+ * @param {{ noLaunch?: boolean }} [cliOpts] 命令行行为选项
  */
-function executeCommand(cmd, asarPath) {
+function executeCommand(cmd, asarPath, cliOpts = {}) {
   if (cmd === 'status') {
     const st = getPatchStatus(asarPath);
     console.log(`目标文件: ${st.asarPath}`);
@@ -360,12 +386,16 @@ function executeCommand(cmd, asarPath) {
     return;
   }
   if (cmd === 'install') {
-    const res = installPatch({ asarPath });
+    const res = installPatch({ asarPath, autoLaunch: !cliOpts.noLaunch });
     console.log(`中文补丁安装成功！应用版本: ${res.version}`);
+    console.log(`目标路径: ${res.asarPath}`);
     console.log(
       `已更新内部文件数: ${res.updatedCount}（托盘计数: ${res.trayPatched ? '已应用' : '跳过'}，托盘/主菜单: ${res.mainPatched && res.menuPatched ? '已应用' : '部分跳过'}）`
     );
     console.log(`原始备份已保存至: ${res.backupPath}`);
+    if (res.launchedExePath) {
+      console.log(`已自动打开软件: ${res.launchedExePath}`);
+    }
     return;
   }
   if (cmd === 'restore') {
@@ -374,7 +404,7 @@ function executeCommand(cmd, asarPath) {
     console.log(`目标文件: ${res.asarPath}`);
     return;
   }
-  throw new Error('用法: node patcher.js <install|restore|status|interactive> [--asar <app.asar路径>]');
+  throw new Error('用法: node patcher.js <install|restore|status|interactive> [--asar <路径>] [--no-launch]');
 }
 
 /**
@@ -393,15 +423,18 @@ async function askChoice(rl) {
 
 /**
  * 启动基于 Node.js readline 的 UTF-8 交互式中文菜单，规避 cmd.exe 乱码与跳转错位。
- * @param {string} asarPath 目标 app.asar 路径
+ * @param {string | undefined} asarPath 目标 app.asar 路径
+ * @param {{ noLaunch?: boolean }} [cliOpts] 命令行行为选项
  * @returns {Promise<void>}
  */
-async function runInteractiveMenu(asarPath) {
+async function runInteractiveMenu(asarPath, cliOpts = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const choiceToCmd = Object.freeze({ '1': 'install', '2': 'restore', '3': 'status' });
+  const resolved = resolveTargetAsarPath(asarPath);
+  const displayPath = fs.existsSync(resolved) ? `${resolved}（已自动检测）` : '未自动检测到，请安装客户端或用 --asar 指定';
   try {
     while (true) {
-      printMenuBanner();
+      printMenuBanner(displayPath);
       const choice = await askChoice(rl);
       if (choice === null || choice === '0') {
         console.log('已退出管理工具。');
@@ -414,7 +447,7 @@ async function runInteractiveMenu(asarPath) {
       }
       console.log('');
       try {
-        executeCommand(cmd, asarPath);
+        executeCommand(cmd, asarPath, cliOpts);
       } catch (err) {
         console.error(`[错误] ${err.message}`);
       }
@@ -432,12 +465,13 @@ async function runInteractiveMenu(asarPath) {
 async function runCli(argv) {
   const cmd = argv[0];
   const asarFlagIdx = argv.indexOf('--asar');
-  const asarPath = asarFlagIdx !== -1 ? argv[asarFlagIdx + 1] : DEFAULT_ASAR_PATH;
+  const asarPath = asarFlagIdx !== -1 ? argv[asarFlagIdx + 1] : undefined;
+  const cliOpts = { noLaunch: argv.includes('--no-launch') };
   if (cmd === 'interactive') {
-    await runInteractiveMenu(asarPath);
+    await runInteractiveMenu(asarPath, cliOpts);
     return;
   }
-  executeCommand(cmd, asarPath);
+  executeCommand(cmd, asarPath, cliOpts);
 }
 
 if (require.main === module) {
@@ -452,6 +486,7 @@ module.exports = Object.freeze({
   BACKUP_SUFFIX,
   PATCH_MARKER_START,
   PATCH_MARKER_END,
+  resolveTargetAsarPath,
   buildPatchedPreload,
   buildPatchedTray,
   buildPatchedMain,
