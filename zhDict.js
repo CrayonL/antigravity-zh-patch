@@ -281,6 +281,8 @@ const EXACT_MAP = Object.freeze({
 
   // 聊天输入区与辅助面板
   'Ask anything, @ to mention, / for actions': '随时提问，输入 @ 引用上下文，输入 / 调用指令',
+  'Quote': '引用',
+  'Side Question': '侧边提问',
   'Artifacts': '产物文档',
   'Subagents': '子智能体',
   'Background Tasks': '后台任务',

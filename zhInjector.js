@@ -32,17 +32,19 @@ const SKIP_TAGS = new Set([
 // 需要尝试翻译的常见提示/无障碍属性名
 const TRANSLATABLE_ATTRS = Object.freeze(['placeholder', 'title', 'aria-label']);
 
-// 跳过聊天正文、代码编辑器及显式排除区域的选择器
-const SKIP_ANCESTOR_SELECTOR = [
+// 始终跳过的编辑区、代码块及显式排除容器
+const HARD_SKIP_SELECTOR = [
   '[contenteditable="true"]',
   '[data-zh-skip="true"]',
   '.monaco-editor',
   '.cm-editor',
   '.hljs',
   '.shiki',
-  '.markdown-body',
-  '.prose',
 ].join(',');
+
+// 聊天正文容器：跳过普通段落文本，但允许其中的软件 UI 按钮/悬浮工具栏（如划词 Quote）翻译
+const CONTENT_SKIP_SELECTOR = '.markdown-body,.prose';
+const UI_CONTROL_SELECTOR = 'button,[role="button"],[role="toolbar"],[role="menu"],[role="menuitem"]';
 
 // 词典匹配的最大文本长度阈值，覆盖设置页长说明文案同时过滤聊天长正文
 const MAX_UI_TEXT_LENGTH = 320;
@@ -87,8 +89,14 @@ function isProtectedElement(el) {
   if (SKIP_TAGS.has(el.tagName)) {
     return true;
   }
-  if (typeof el.closest === 'function' && el.closest(SKIP_ANCESTOR_SELECTOR)) {
+  if (typeof el.closest !== 'function') {
+    return false;
+  }
+  if (el.closest(HARD_SKIP_SELECTOR)) {
     return true;
+  }
+  if (el.closest(CONTENT_SKIP_SELECTOR)) {
+    return !el.closest(UI_CONTROL_SELECTOR);
   }
   return false;
 }
@@ -146,7 +154,10 @@ function translateSubtree(rootNode) {
     return;
   }
   translateElementAttrs(rootNode);
-  if (isProtectedElement(rootNode)) {
+  if (SKIP_TAGS.has(rootNode.tagName)) {
+    return;
+  }
+  if (typeof rootNode.closest === 'function' && rootNode.closest(HARD_SKIP_SELECTOR)) {
     return;
   }
   const children = rootNode.childNodes;

@@ -63,13 +63,18 @@ function createMockElement(tagName, opts = {}) {
     tagName: tagName.toUpperCase(),
     parentElement: null,
     childNodes: [],
+    _matchedSelectors: matchedSelectors,
     getAttribute: (name) => (attrs.has(name) ? attrs.get(name) : null),
     setAttribute: (name, val) => attrs.set(name, String(val)),
     closest(selector) {
+      const parts = selector.split(',').map((s) => s.trim().toLowerCase());
       let cur = this;
       while (cur) {
-        for (const s of matchedSelectors) {
-          if (selector.includes(s)) {
+        if (parts.includes(cur.tagName.toLowerCase())) {
+          return cur;
+        }
+        for (const s of cur._matchedSelectors) {
+          if (parts.includes(s.toLowerCase())) {
             return cur;
           }
         }
@@ -465,6 +470,23 @@ test('回归测试：覆盖设置各子页长文案（>180字符）、动态倒�
   );
   assert.equal(translateString('Claude and GPT models'), 'Claude 与 GPT 模型');
   assert.equal(translateString('Gemini 4 Argon Weekly Limit'), 'Gemini 4 Argon 每周配额');
+
+  // 5. 划词悬浮工具栏（Quote / Side Question）：即使位于聊天正文容器内的按钮也能汉化，同时正文段落仍受保护
+  const proseParagraphText = createMockText('Save');
+  const quoteBtnText = createMockText('Quote');
+  const sideQBtnText = createMockText('Side Question');
+  const proseContainer = createMockElement('div', {
+    matchedSelectors: ['.markdown-body'],
+    children: [
+      createMockElement('p', { children: [proseParagraphText] }),
+      createMockElement('button', { children: [quoteBtnText] }),
+      createMockElement('button', { children: [sideQBtnText] }),
+    ],
+  });
+  translateSubtree(proseContainer);
+  assert.equal(proseParagraphText.nodeValue, 'Save');
+  assert.equal(quoteBtnText.nodeValue, '引用');
+  assert.equal(sideQBtnText.nodeValue, '侧边提问');
 });
 
 test('appLocator 自动检索路径、注册表解析、独立进程启动与 installPatch 自动拉起集成', () => {
