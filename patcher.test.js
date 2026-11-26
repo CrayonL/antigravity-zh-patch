@@ -34,6 +34,7 @@ const {
   buildPatchedTray,
   buildPatchedMain,
   buildPatchedMenu,
+  buildPatchedIpcHandlers,
   getPatchStatus,
   installPatch,
   restorePatch,
@@ -231,7 +232,8 @@ test('端到端副本集成测试：真实 app.asar 安装、幂等重复安装�
     assert.equal(res1.trayPatched, true);
     assert.equal(res1.mainPatched, true);
     assert.equal(res1.menuPatched, true);
-    assert.equal(res1.updatedCount, 4);
+    assert.equal(res1.ipcPatched, true);
+    assert.equal(res1.updatedCount, 6);
     assert.equal(getPatchStatus(copyAsar).patched, true);
 
     // 校验内联补丁、主进程托盘/菜单补丁与未修改文件均完整无损
@@ -256,8 +258,13 @@ test('端到端副本集成测试：真实 app.asar 安装、幂等重复安装�
     assert.ok(patchedMenuContent.includes("item.label === 'View'"));
     assert.ok(patchedMenuContent.includes("addItemToSubmenu(menu, 'Help', 0,"));
 
+    const patchedIpcContent = readAsarFile(copyAsar, 'dist/ipcHandlers.js').toString('utf8');
+    assert.ok(patchedIpcContent.includes('__zhTranslateMenuLabel'));
+    assert.ok(readAsarFile(copyAsar, 'dist/zhDict.js').toString('utf8').includes('Conversation Archived'));
+
     assert.equal(buildPatchedMain('no match').matched, false);
     assert.equal(buildPatchedMenu('no match').matched, false);
+    assert.equal(buildPatchedIpcHandlers('no match').matched, false);
 
     // 校验 unpacked 条目仍被完整保留
     const { header } = parseAsarHeader(copyAsar);
@@ -575,6 +582,142 @@ test('appLocator 自动检索路径、注册表解析、独立进程启动与 in
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('归档弹窗与左侧对话栏原生右键上下文菜单（ipcHandlers）汉化验证', () => {
+  // 1. 归档 Toast 弹窗（含中间嵌 <svg> 图标的拆分文本节点与 Undo 按钮）
+  const toastTitle = createMockText('Conversation Archived');
+  const toastPrefix = createMockText('View archived in the sidebar (');
+  const toastSuffix = createMockText(' menu).');
+  const undoBtnText = createMockText('Undo');
+  const toastRoot = createMockElement('div', {
+    children: [
+      toastTitle,
+      createMockElement('div', {
+        children: [toastPrefix, createMockElement('svg'), toastSuffix],
+      }),
+      createMockElement('button', { children: [undoBtnText] }),
+    ],
+  });
+  translateSubtree(toastRoot);
+  assert.equal(toastTitle.nodeValue, '对话已归档');
+  assert.equal(toastPrefix.nodeValue, '可在侧边栏（');
+  assert.equal(toastSuffix.nodeValue, ' 菜单）中查看已归档对话。');
+  assert.equal(undoBtnText.nodeValue, '撤销');
+
+  // 2. 基于真实 dist/ipcHandlers.js 的原生右键菜单模板构造器验证
+  const defaultBackup = `${DEFAULT_ASAR_PATH}${BACKUP_SUFFIX}`;
+  const cleanSource = fs.existsSync(defaultBackup) ? defaultBackup : DEFAULT_ASAR_PATH;
+  const origIpc = readAsarFile(cleanSource, 'dist/ipcHandlers.js').toString('utf8');
+  const { content: patchedIpc, matched } = buildPatchedIpcHandlers(origIpc);
+  assert.equal(matched, true);
+
+  // 幂等性验证：重复打补丁不重复插入辅助函数
+  const twiceIpc = buildPatchedIpcHandlers(patchedIpc);
+  assert.equal(twiceIpc.content.split('function __zhTranslateMenuLabel').length - 1, 1);
+
+  // 提取注入的上下文菜单片段并在独立沙盒执行，验证菜单项、子菜单及原始 id 回调完好
+  const startIdx = patchedIpc.indexOf("const { EXACT_MAP: __zhExactMap");
+  const endIdx = patchedIpc.indexOf('\n/**\n * Registers all IPC handlers', startIdx);
+  const snippet = patchedIpc.slice(startIdx, endIdx);
+  const zhDict = require('./zhDict');
+  const ctx = {
+    require: (id) => {
+      if (id === './zhDict') return zhDict;
+      throw new Error(`unexpected require: ${id}`);
+    },
+  };
+  vm.runInNewContext(`${snippet}\nthis.buildContextMenuTemplate = buildContextMenuTemplate;`, ctx);
+
+  let selectedId = null;
+  const template = ctx.buildContextMenuTemplate(
+    [
+      { id: 'rename', label: 'Rename' },
+      { id: 'pin', label: 'Pin' },
+      { id: 'archive', label: 'Archive' },
+      { type: 'separator' },
+      {
+        id: 'move',
+        label: 'Move to Project',
+        type: 'submenu',
+        submenu: [
+          { id: 'proj-1', label: 'MyCustomProject' },
+          { id: 'remove-proj', label: 'Remove from Project' },
+        ],
+      },
+      { id: 'delete', label: 'Delete' },
+    ],
+    (id) => {
+      selectedId = id;
+    }
+  );
+
+  assert.equal(template[0].label, '重命名');
+  assert.equal(template[1].label, '置顶');
+  assert.equal(template[2].label, '归档');
+  assert.equal(template[3].type, 'separator');
+  assert.equal(template[4].label, '移动到项目');
+  assert.equal(template[4].submenu[0].label, 'MyCustomProject');
+  assert.equal(template[4].submenu[1].label, '从项目中移除');
+  assert.equal(template[5].label, '删除');
+
+  template[2].click();
+  assert.equal(selectedId, 'archive');
+});
+
+test('大小写/省略号兼容及 2.35.2 截图新增词条（设置/快捷键/项目与对话菜单）验证', () => {
+  // 1. Sentence case 与 Title Case 统一兼容，单字不误翻小写
+  assert.equal(translateString('Your plan: Google AI Pro'), '当前方案：Google AI Pro');
+  assert.equal(translateString('Enable AI credit overages'), '启用 AI 积分超额使用');
+  assert.equal(translateString('Prevent sleep'), '防止休眠');
+  assert.equal(translateString('Keep in menu bar'), '驻留系统托盘');
+  assert.equal(translateString('Notification settings'), '通知设置');
+  assert.equal(translateString('Conversation steps'), '对话步骤');
+  assert.equal(translateString('Open links in'), '链接打开方式');
+  assert.equal(translateString('Download location'), '下载位置');
+  assert.equal(translateString('Browsing history'), '浏览历史');
+  assert.equal(translateString('Browser actuation rules'), '浏览器操作规则');
+  assert.equal(translateString('Change…'), '更改...');
+  assert.equal(translateString('open'), null);
+
+  // 2. 应用程序与高级设置页
+  assert.equal(translateString('Manage Antigravity app settings.'), '管理 Antigravity 应用设置。');
+  assert.equal(translateString('Automatic check for updates'), '自动检查更新');
+  assert.equal(
+    translateString(
+      'Automatically prompt you to restart the app when a new update is available. When disabled, you can check for updates manually from the app menu.'
+    ),
+    '有新版本可用时自动提示重启应用。禁用后，你仍可从应用菜单手动检查更新。'
+  );
+
+  // 3. 快捷键列表新增词条与布局控制
+  assert.equal(translateString('Toggle Model Selector'), '切换模型选择器');
+  assert.equal(translateString('Toggle Project Selector'), '切换项目选择器');
+  assert.equal(translateString('Toggle Environment Selector'), '切换环境选择器');
+  assert.equal(translateString('Toggle Voice Recording'), '开关语音录制');
+  assert.equal(translateString('Mute Voice Mic'), '静音语音麦克风');
+  assert.equal(translateString('Mute Voice Speaker'), '静音语音扬声器');
+  assert.equal(translateString('Find in Conversation'), '在对话中查找');
+  assert.equal(translateString('Find in Pane'), '在面板中查找');
+  assert.equal(translateString('Add to Chat/Quote'), '添加到对话 / 引用');
+  assert.equal(translateString('Comment on Selection'), '对选中内容添加批注');
+  assert.equal(translateString('Side Question Selection'), '对选中内容侧边提问');
+  assert.equal(translateString('Split Conversation Horizontally'), '水平拆分对话');
+  assert.equal(translateString('Split Conversation Vertically'), '垂直拆分对话');
+  assert.equal(translateString('Pin / Unpin Conversation'), '置顶 / 取消置顶对话');
+  assert.equal(translateString('Archive This Conversation'), '归档当前对话');
+  assert.equal(translateString('Layout Controls'), '布局控制');
+  assert.equal(translateString('Toggle Side Panel'), '切换右侧辅助面板');
+  assert.equal(translateString('Switch to Tab 3'), '切换到标签页 3');
+
+  // 4. 项目菜单与对话菜单新增词条
+  assert.equal(translateString('Copy Project Name'), '复制项目名称');
+  assert.equal(translateString('Show in File Explorer'), '在文件资源管理器中显示');
+  assert.equal(translateString('Delete Project'), '删除项目');
+  assert.equal(translateString('Mark Unread'), '标为未读');
+  assert.equal(translateString('Split'), '拆分视图');
+});
+
+
 
 
 

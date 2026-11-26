@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **全面覆盖常用界面**：涵盖顶部菜单栏、左侧主边栏、首页提示与欢迎语、设置页（常规、应用程序、外观、快捷键、通知、模型与用量、浏览器、项目设置）以及右下角系统托盘菜单与 WSL 菜单项。
+- **全面覆盖常用界面**：涵盖顶部菜单栏、左侧主边栏（含右键上下文菜单与归档提示）、首页提示与欢迎语、设置页（常规、应用程序、外观、快捷键、通知、模型与用量、浏览器、项目设置）以及右下角系统托盘菜单与 WSL 菜单项。
 - **零第三方依赖**：纯 Node.js 标准库实现 Electron ASAR 解析、SHA-256 分块完整性校验与重写，无需安装额外 npm 包。
 - **严格保护聊天与代码区**：渲染层通过 `MutationObserver` 增量替换安全 UI 文本节点，显式跳过 `<code>`、`<pre>`、`<textarea>`、`<input>`、`.markdown-body`、`.prose`、`.monaco-editor` 等受保护区域，不破坏 React 节点结构，也不污染代码与聊天正文。
 - **自动检索与一键启停体验**：自动按「常见目录 → Windows 注册表 → 快捷方式 → 本地盘符浅层目录」检索本机 Antigravity 2.0 路径（自动排除 Antigravity IDE），安装补丁完成后自动重新打开软件。
@@ -56,6 +56,7 @@ node patcher.js install --asar "D:\Path\To\antigravity\resources\app.asar"
 | --- | --- |
 | `manage.bat` | Windows 交互式启动脚本（纯 ASCII + CRLF，避免 cmd 乱码） |
 | `patcher.js` | 主控程序，负责进程占用检测、原版备份、补丁注入、语法校验与无损还原 |
+| `nativePatch.js` | 主进程原生菜单（托盘、窗口菜单与 `ipcHandlers` 右键上下文菜单）汉化模块 |
 | `appLocator.js` | Antigravity 2.0 安装路径多级自动检索与独立进程启动模块 |
 | `asarCodec.js` | 纯 Node.js Electron ASAR 头部解析、SHA-256 分块校验与重打包模块 |
 | `zhInjector.js` | 渲染层 DOM 汉化引擎与零 `require` 沙盒内联打包器 |

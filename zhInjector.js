@@ -53,6 +53,26 @@ const FLUSH_DELAY_MS = 24;
 // 防止同一窗口重复安装观察器的全局标记键
 const INSTALLED_FLAG = '__ANTIGRAVITY_ZH_OVERLAY_INSTALLED__';
 
+// 懒构建多词/带标点词条的小写索引表，兼容 Title Case 与 Sentence case 差异
+let lowerExactMap = null;
+
+function getLowerExactMap() {
+  if (lowerExactMap) {
+    return lowerExactMap;
+  }
+  const map = Object.create(null);
+  for (const [key, val] of Object.entries(EXACT_MAP)) {
+    if (key.includes(' ') || key.includes(':') || key.includes('...') || key.includes('…')) {
+      const normalizedKey = key.replace(/\u2026/g, '...').toLowerCase();
+      if (!Object.prototype.hasOwnProperty.call(map, normalizedKey)) {
+        map[normalizedKey] = val;
+      }
+    }
+  }
+  lowerExactMap = map;
+  return lowerExactMap;
+}
+
 /**
  * 尝试将单条英文 UI 文案翻译为中文；无匹配时返回 null。
  * @param {string} rawText 原始字符串
@@ -69,9 +89,19 @@ function translateString(rawText) {
   if (Object.prototype.hasOwnProperty.call(EXACT_MAP, trimmed)) {
     return rawText.replace(trimmed, EXACT_MAP[trimmed]);
   }
+  // 归一化不换行空格与 Unicode 省略号后再查表及多词小写兜底
+  const normalized = trimmed.replace(/\u00a0/g, ' ').replace(/\u2026/g, '...');
+  if (Object.prototype.hasOwnProperty.call(EXACT_MAP, normalized)) {
+    return rawText.replace(trimmed, EXACT_MAP[normalized]);
+  }
+  const lowerMap = getLowerExactMap();
+  const lowerKey = normalized.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(lowerMap, lowerKey)) {
+    return rawText.replace(trimmed, lowerMap[lowerKey]);
+  }
   for (const rule of REGEX_RULES) {
-    if (rule.pattern.test(trimmed)) {
-      return rawText.replace(trimmed, trimmed.replace(rule.pattern, rule.replace));
+    if (rule.pattern.test(normalized)) {
+      return rawText.replace(trimmed, normalized.replace(rule.pattern, rule.replace));
     }
   }
   return null;

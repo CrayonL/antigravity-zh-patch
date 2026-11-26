@@ -13,6 +13,12 @@ const { execFileSync } = require('child_process');
 const { parseAsarHeader, readAsarFile, rewriteAsar } = require('./asarCodec');
 const { buildInlinePreloadBundle } = require('./zhInjector');
 const { locateAntigravityApp, launchAntigravity } = require('./appLocator');
+const {
+  buildPatchedTray,
+  buildPatchedMain,
+  buildPatchedMenu,
+  buildPatchedIpcHandlers,
+} = require('./nativePatch');
 const zhDict = require('./zhDict');
 
 // 默认安装路径与 ASAR 内部目标路径常量
@@ -29,34 +35,14 @@ const PRELOAD_REL_PATH = 'dist/preload.js';
 const TRAY_REL_PATH = 'dist/tray.js';
 const MAIN_REL_PATH = 'dist/main.js';
 const MENU_REL_PATH = 'dist/menu.js';
+const IPC_REL_PATH = 'dist/ipcHandlers.js';
+const DICT_REL_PATH = 'dist/zhDict.js';
 const PKG_REL_PATH = 'package.json';
 const PROCESS_CHECK_TIMEOUT_MS = 5000;
 
 // 补丁起止标记，保证重复安装幂等且可精确识别
 const PATCH_MARKER_START = '// === ANTIGRAVITY_ZH_PATCH_START ===';
 const PATCH_MARKER_END = '// === ANTIGRAVITY_ZH_PATCH_END ===';
-
-// dist/tray.js 中待汉化的英文计数模板正则
-const TRAY_COUNT_PATTERN =
-  /\(count > 0 \? `\$\{count\}` : 'No'\) \+\s*' agent' \+\s*\(count === 1 \? '' : 's'\) \+\s*' running';/;
-const TRAY_COUNT_ZH =
-  "count > 0 ? `${count} 个智能体运行中` : '当前无运行中的智能体';";
-
-// dist/main.js 中原生系统托盘与 Dock 菜单的精确替换规则
-const MAIN_MENU_RULES = Object.freeze([
-  Object.freeze({ pattern: /label:\s*'No agents running'/, replace: "label: '当前无运行中的智能体'" }),
-  Object.freeze({ pattern: /label:\s*`Open \$\{electron_1\.app\.getName\(\)\}`/, replace: 'label: `打开 ${electron_1.app.getName()}`' }),
-  Object.freeze({ pattern: /label:\s*'Quit'/, replace: "label: '退出'" }),
-  Object.freeze({ pattern: /label:\s*'New Window'/, replace: "label: '新建窗口'" }),
-]);
-
-// dist/menu.js 中主菜单与 WSL 托盘子菜单的精确替换规则（不改动 File/View/Help 等查找键）
-const APP_MENU_RULES = Object.freeze([
-  Object.freeze({ pattern: /label:\s*'New Window'/, replace: "label: '新建窗口'" }),
-  Object.freeze({ pattern: /label:\s*'Docs'/, replace: "label: '文档'" }),
-  Object.freeze({ pattern: /label:\s*'Connect to WSL'/, replace: "label: '连接到 WSL'" }),
-  Object.freeze({ pattern: /label:\s*'Reopen Locally'/, replace: "label: '在本地重新打开'" }),
-]);
 
 /**
  * 检测 Windows 系统中 Antigravity.exe 是否仍在运行。
@@ -118,57 +104,6 @@ function buildPatchedPreload(preloadText) {
     '',
   ].join('\n');
   return `${cleanText.trimEnd()}\n${hookBlock}`;
-}
-
-/**
- * 尝试汉化 dist/tray.js 中的运行中智能体计数文案。
- * @param {string} trayText 原始 tray.js 源码
- * @returns {{ content: string, matched: boolean }}
- */
-function buildPatchedTray(trayText) {
-  if (!TRAY_COUNT_PATTERN.test(trayText)) {
-    return { content: trayText, matched: false };
-  }
-  return {
-    content: trayText.replace(TRAY_COUNT_PATTERN, TRAY_COUNT_ZH),
-    matched: true,
-  };
-}
-
-/**
- * 按规则列表逐条替换目标源码中的英文菜单文案，返回更新结果与命中数量。
- * @param {string} sourceText 原始源码文本
- * @param {ReadonlyArray<{ pattern: RegExp, replace: string }>} rules 替换规则列表
- * @returns {{ content: string, matched: boolean, matchedCount: number }}
- */
-function applyLabelRules(sourceText, rules) {
-  let content = sourceText;
-  let matchedCount = 0;
-  for (const rule of rules) {
-    if (rule.pattern.test(content)) {
-      content = content.replace(rule.pattern, rule.replace);
-      matchedCount += 1;
-    }
-  }
-  return { content, matched: matchedCount > 0, matchedCount };
-}
-
-/**
- * 尝试汉化 dist/main.js 中的原生托盘初始菜单与 Dock 菜单文案。
- * @param {string} mainText 原始 main.js 源码
- * @returns {{ content: string, matched: boolean, matchedCount: number }}
- */
-function buildPatchedMain(mainText) {
-  return applyLabelRules(mainText, MAIN_MENU_RULES);
-}
-
-/**
- * 尝试汉化 dist/menu.js 中的主菜单与 WSL 托盘子菜单文案。
- * @param {string} menuText 原始 menu.js 源码
- * @returns {{ content: string, matched: boolean, matchedCount: number }}
- */
-function buildPatchedMenu(menuText) {
-  return applyLabelRules(menuText, APP_MENU_RULES);
 }
 
 /**
@@ -252,23 +187,28 @@ function getPatchStatus(asarPath) {
 /**
  * 从干净源 ASAR 中构建并通过语法校验的补丁文件映射。
  * @param {string} cleanSourcePath 未打补丁的原始 ASAR 路径
- * @returns {{ updates: Record<string, string>, trayPatched: boolean, mainPatched: boolean, menuPatched: boolean }}
+ * @returns {{ updates: Record<string, string>, trayPatched: boolean, mainPatched: boolean, menuPatched: boolean, ipcPatched: boolean }}
  */
 function buildAsarUpdates(cleanSourcePath) {
   const origPreload = readAsarFile(cleanSourcePath, PRELOAD_REL_PATH).toString('utf8');
   const origTray = readAsarFile(cleanSourcePath, TRAY_REL_PATH).toString('utf8');
   const origMain = readAsarFile(cleanSourcePath, MAIN_REL_PATH).toString('utf8');
   const origMenu = readAsarFile(cleanSourcePath, MENU_REL_PATH).toString('utf8');
+  const origIpc = readAsarFile(cleanSourcePath, IPC_REL_PATH).toString('utf8');
+  const dictSource = fs.readFileSync(path.join(__dirname, 'zhDict.js'), 'utf8');
 
   const patchedPreload = buildPatchedPreload(origPreload);
   const trayResult = buildPatchedTray(origTray);
   const mainResult = buildPatchedMain(origMain);
   const menuResult = buildPatchedMenu(origMenu);
+  const ipcResult = buildPatchedIpcHandlers(origIpc);
 
   assertValidJsSyntax(patchedPreload, PRELOAD_REL_PATH);
   assertValidJsSyntax(trayResult.content, TRAY_REL_PATH);
   assertValidJsSyntax(mainResult.content, MAIN_REL_PATH);
   assertValidJsSyntax(menuResult.content, MENU_REL_PATH);
+  assertValidJsSyntax(ipcResult.content, IPC_REL_PATH);
+  assertValidJsSyntax(dictSource, DICT_REL_PATH);
 
   const updates = { [PRELOAD_REL_PATH]: patchedPreload };
   if (trayResult.matched) {
@@ -280,11 +220,16 @@ function buildAsarUpdates(cleanSourcePath) {
   if (menuResult.matched) {
     updates[MENU_REL_PATH] = menuResult.content;
   }
+  if (ipcResult.matched) {
+    updates[IPC_REL_PATH] = ipcResult.content;
+    updates[DICT_REL_PATH] = dictSource;
+  }
   return {
     updates,
     trayPatched: trayResult.matched,
     mainPatched: mainResult.matched,
     menuPatched: menuResult.matched,
+    ipcPatched: ipcResult.matched,
   };
 }
 
@@ -306,7 +251,7 @@ function installPatch(options = {}) {
   const backupPath = `${asarPath}${BACKUP_SUFFIX}`;
   const cleanSourcePath = ensureCleanBackup(asarPath, backupPath);
   const version = readAsarAppVersion(cleanSourcePath);
-  const { updates, trayPatched, mainPatched, menuPatched } = buildAsarUpdates(cleanSourcePath);
+  const { updates, trayPatched, mainPatched, menuPatched, ipcPatched } = buildAsarUpdates(cleanSourcePath);
 
   const result = rewriteAsar({ sourcePath: cleanSourcePath, targetPath: asarPath, updates });
   // 回读校验确保新生成的 ASAR 完整可读
@@ -325,6 +270,7 @@ function installPatch(options = {}) {
     trayPatched,
     mainPatched,
     menuPatched,
+    ipcPatched,
     updatedCount: result.updatedCount,
     launchedExePath,
   };
@@ -390,7 +336,7 @@ function executeCommand(cmd, asarPath, cliOpts = {}) {
     console.log(`中文补丁安装成功！应用版本: ${res.version}`);
     console.log(`目标路径: ${res.asarPath}`);
     console.log(
-      `已更新内部文件数: ${res.updatedCount}（托盘计数: ${res.trayPatched ? '已应用' : '跳过'}，托盘/主菜单: ${res.mainPatched && res.menuPatched ? '已应用' : '部分跳过'}）`
+      `已更新内部文件数: ${res.updatedCount}（托盘计数: ${res.trayPatched ? '已应用' : '跳过'}，托盘/主菜单: ${res.mainPatched && res.menuPatched ? '已应用' : '部分跳过'}，右键菜单: ${res.ipcPatched ? '已应用' : '跳过'}）`
     );
     console.log(`原始备份已保存至: ${res.backupPath}`);
     if (res.launchedExePath) {
@@ -491,6 +437,7 @@ module.exports = Object.freeze({
   buildPatchedTray,
   buildPatchedMain,
   buildPatchedMenu,
+  buildPatchedIpcHandlers,
   getPatchStatus,
   installPatch,
   restorePatch,
