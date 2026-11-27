@@ -717,6 +717,91 @@ test('大小写/省略号兼容及 2.35.2 截图新增词条（设置/快捷键/
   assert.equal(translateString('Split'), '拆分视图');
 });
 
+test('回归测试：工具权限、权限预设下拉说明、外观高级设置、终端快捷键、浏览器操作权限与概览面板', () => {
+  // 1. 图 1 与图 4：工具权限页与权限预设下拉框（含小字说明）
+  const generalEntries = [
+    ['File access rules', '文件访问规则'],
+    ['Configure allowed and denied paths for file reads and writes.', '配置文件读写的允许和拒绝路径。'],
+    ['Terminal commands', '终端命令'],
+    ['Configure allowed terminal commands.', '配置允许执行的终端命令。'],
+    ['MCP tools', 'MCP 工具'],
+    ['Configure external tools via Model Context Protocol.', '通过模型上下文协议 (MCP) 配置外部工具。'],
+    ['Plugin permissions', '插件权限'],
+    ['Changes plugins can make without asking.', '插件无需询问即可执行的更改。'],
+    ['Every command requires approval.', '每条命令都需要批准后执行。'],
+    ['Ask before sensitive operations.', '执行敏感操作前先询问。'],
+    ['Auto', '自动'],
+    ['Automatically decide if commands run.', '自动判断是否直接运行命令。'],
+    ['Turbo', '极速'],
+    ['Run all commands without restrictions.', '无限制直接运行所有命令。'],
+    ['Orchestrator', '编排器'],
+  ];
+  for (const [en, zh] of generalEntries) {
+    assert.equal(translateString(en), zh);
+  }
+
+  // 2. 图 3：外观页高级设置
+  const appearanceEntries = [
+    ['Chat Layout', '聊天布局'],
+    ['Configure the maximum width of the conversation panel.', '配置对话面板的最大宽度。'],
+    ['Narrow', '窄屏'],
+    ['Fill', '铺满'],
+    ['Accessibility', '无障碍'],
+    ['Screen reader mode', '屏幕阅读器模式'],
+    ['Optimize the interface and terminal output for screen readers.', '针对屏幕阅读器优化界面和终端输出。'],
+  ];
+  for (const [en, zh] of appearanceEntries) {
+    assert.equal(translateString(en), zh);
+  }
+
+  // 3. 图 2：快捷键底部布局与终端快捷键及右侧概览面板
+  const shortcutAndOverviewEntries = [
+    ['Toggle Maximize Side Panel', '切换最大化右侧面板'],
+    ['Toggle Overview Panel', '切换概览面板'],
+    ['Split Terminal', '拆分终端'],
+    ['New Terminal Tab', '新建终端标签页'],
+    ['Terminal: Add to Chat', '终端：添加到对话'],
+    ['Terminal: Select All', '终端：全选'],
+    ['Files', '文件'],
+    ['Terminal', '终端'],
+  ];
+  for (const [en, zh] of shortcutAndOverviewEntries) {
+    assert.equal(translateString(en), zh);
+  }
+
+  // 4. 图 5：浏览器操作权限子页
+  const browserPermEntries = [
+    ['Browser Actuation Permissions', '浏览器操作权限'],
+    ['Execute URLs', '可执行网址'],
+    ['Allow/deny agent browser actuation access to specific URLs.', '允许或拒绝智能体在指定网址执行浏览器操作。'],
+    ['Download files', '文件下载'],
+    ['Allow/deny agent browser file downloads from specific sites.', '允许或拒绝智能体从指定网站下载文件。'],
+  ];
+  for (const [en, zh] of browserPermEntries) {
+    assert.equal(translateString(en), zh);
+  }
+
+  // 5. 本地与远程对话权限区块及单词小写安全边界
+  assert.equal(
+    translateString('Configure what the agent can do in local and remote conversations.'),
+    '配置智能体在本地和远程对话中可执行的操作。'
+  );
+  assert.equal(
+    translateString('Configure what the agent can do in local and remote conversations. Learn more.'),
+    '配置智能体在本地和远程对话中可执行的操作。了解更多。'
+  );
+  assert.equal(translateString('This computer'), '本机');
+  assert.equal(translateString('Remote'), '远程');
+  assert.equal(translateString('Controls permissions for remote conversations.'), '控制远程对话的权限。');
+
+  // 单词小写安全边界：不误翻正文中独立出现的小写普通英文单词
+  assert.equal(translateString('auto'), null);
+  assert.equal(translateString('turbo'), null);
+  assert.equal(translateString('files'), null);
+  assert.equal(translateString('terminal'), null);
+  assert.equal(translateString('remote'), null);
+});
+
 
 
 
